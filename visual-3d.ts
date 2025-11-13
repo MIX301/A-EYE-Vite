@@ -101,7 +101,7 @@ export class GdmLiveAudioVisuals3D extends LitElement {
       0.1,
       1000,
     );
-    camera.position.set(2, -2, 5);
+    camera.position.set(1.8, -1.8, 3.6);
     this.camera = camera;
 
     const renderer = new THREE.WebGLRenderer({
@@ -207,7 +207,7 @@ export class GdmLiveAudioVisuals3D extends LitElement {
 
     if (sphereMaterial.userData.shader) {
       this.sphere.scale.setScalar(
-        1 + (0.2 * this.outputAnalyser.data[1]) / 255,
+        1.35 + (0.25 * this.outputAnalyser.data[1]) / 255,
       );
 
       const f = 0.001;
@@ -222,7 +222,7 @@ export class GdmLiveAudioVisuals3D extends LitElement {
         this.rotation.z,
       );
       const quaternion = new THREE.Quaternion().setFromEuler(euler);
-      const vector = new THREE.Vector3(0, 0, 5);
+      const vector = new THREE.Vector3(0, 0, 3.6);
       vector.applyQuaternion(quaternion);
       this.camera.position.copy(vector);
       this.camera.lookAt(this.sphere.position);

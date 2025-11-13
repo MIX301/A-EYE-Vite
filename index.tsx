@@ -24,9 +24,10 @@ export class GdmLiveAudio extends LitElement {
   @state() isRecording = false;
   @state() status = '';
   @state() error = '';
+  @state() appStopped = false;
 
   private client: GoogleGenAI;
-  private sessionPromise: Promise<Session>;
+  private sessionPromise?: Promise<Session>;
   // FIX: Cast window to `any` to access prefixed `webkitAudioContext` for older browsers.
   private inputAudioContext = new (window.AudioContext ||
     (window as any).webkitAudioContext)({sampleRate: 16000});
@@ -46,69 +47,130 @@ export class GdmLiveAudio extends LitElement {
   private framesSent = 0;
 
   static styles = css`
+    :host {
+      display: block;
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      min-height: 100dvh;
+      background: #000000;
+      color: #ffffff;
+      overflow: hidden;
+    }
+
+    @supports (height: 100dvh) {
+      :host {
+        height: 100dvh;
+      }
+    }
+
+    .layout {
+      position: relative;
+      width: 100%;
+      height: 100%;
+    }
+
     #video-background {
       position: absolute;
       top: 0;
       left: 0;
       width: 100%;
-      height: 50vh;
+      height: 66.667vh;
       object-fit: cover;
     }
 
-    gdm-live-audio-visuals-3d {
-      display: block;
+    .speak-area {
       position: absolute;
       bottom: 0;
       left: 0;
       width: 100%;
-      height: 50vh;
+      height: calc(33.333vh + env(safe-area-inset-bottom));
+      border-top-left-radius: 32px;
+      border-top-right-radius: 32px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-bottom: none;
+      overflow: hidden;
+      backdrop-filter: blur(6px);
     }
 
-    #status {
+    .session-overlay {
       position: absolute;
-      bottom: 5vh;
-      left: 0;
-      right: 0;
-      z-index: 10;
-      text-align: center;
-      color: white;
-      text-shadow: 0 0 4px black;
-    }
-
-    .controls {
-      z-index: 10;
-      position: absolute;
-      bottom: 10vh;
-      left: 0;
-      right: 0;
+      inset: 0;
       display: flex;
       align-items: center;
       justify-content: center;
-      flex-direction: column;
-      gap: 10px;
+      padding: 24px;
+      font-size: 18px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.92);
+      background: linear-gradient(
+        180deg,
+        rgba(17, 24, 39, 0.6) 0%,
+        rgba(15, 23, 42, 0.85) 100%
+      );
+      pointer-events: none;
+      text-align: center;
+    }
 
-      button {
-        outline: none;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        color: white;
-        border-radius: 12px;
-        background: rgba(255, 255, 255, 0.1);
-        width: 64px;
-        height: 64px;
-        cursor: pointer;
-        font-size: 24px;
-        padding: 0;
-        margin: 0;
-        backdrop-filter: blur(10px);
+    gdm-live-audio-visuals-3d {
+      display: block;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      border-top-left-radius: inherit;
+      border-top-right-radius: inherit;
+    }
 
-        &:hover {
-          background: rgba(255, 255, 255, 0.2);
-        }
-      }
+    .speak-button {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      padding: 24px 24px calc(24px + env(safe-area-inset-bottom));
+      color: inherit;
+      transition: background 0.2s ease;
+    }
 
-      button[disabled] {
-        display: none;
-      }
+    .speak-button:hover,
+    .speak-button:focus-visible {
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .speak-button:focus-visible {
+      outline: 2px solid rgba(255, 255, 255, 0.25);
+      outline-offset: 4px;
+    }
+
+    .speak-label {
+      font-size: 18px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.92);
+      text-shadow: 0 0 6px rgba(0, 0, 0, 0.6);
+    }
+
+    .error-banner {
+      position: absolute;
+      top: calc(env(safe-area-inset-top) + 12px);
+      left: 16px;
+      right: 16px;
+      z-index: 10;
+      padding: 12px 16px;
+      background: rgba(220, 38, 38, 0.85);
+      color: #ffffff;
+      border-radius: 12px;
+      text-align: center;
+      font-size: 14px;
+      line-height: 1.4;
+      box-shadow: 0 12px 24px rgba(0, 0, 0, 0.35);
+      backdrop-filter: blur(12px);
     }
   `;
 
@@ -148,9 +210,8 @@ export class GdmLiveAudio extends LitElement {
     if (parts.length) this.updateStatus(`Permissions: ${parts.join(' ')}`);
   }
 
-  private debug(msg: string, data?: unknown) {
-    console.log(`[gdm] ${msg}`, data ?? '');
-    this.status = msg;
+  private debug(_msg: string, _data?: unknown) {
+    // Debug logging disabled for production UI clarity.
   }
 
   private initAudio() {
@@ -231,7 +292,7 @@ export class GdmLiveAudio extends LitElement {
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
-            voiceConfig: {prebuiltVoiceConfig: {voiceName: 'Orus'}},
+            voiceConfig: {prebuiltVoiceConfig: {voiceName: 'Zephyr'}},
             // languageCode: 'en-GB'
           },
         },
@@ -269,6 +330,13 @@ export class GdmLiveAudio extends LitElement {
     if (this.isRecording) {
       return;
     }
+
+    if (!this.sessionPromise) {
+      this.sessionPromise = this.initSession();
+    }
+
+    this.appStopped = false;
+    this.framesSent = 0;
 
     await this.inputAudioContext.resume();
     await this.outputAudioContext.resume();
@@ -379,9 +447,16 @@ export class GdmLiveAudio extends LitElement {
         };
         const mono16k = srcRate === 16000 ? pcmData : downsampleTo16k(pcmData, srcRate);
 
-        this.sessionPromise.then((session) => {
-          session.sendRealtimeInput({media: createBlob(mono16k)});
-        }).catch((e) => this.updateError('Session send failed: ' + e.message));
+        const sessionPromise = this.sessionPromise;
+        if (!sessionPromise) {
+          return;
+        }
+
+        sessionPromise
+          .then((session) => {
+            session.sendRealtimeInput({media: createBlob(mono16k)});
+          })
+          .catch((e) => this.updateError('Session send failed: ' + e.message));
       };
 
       this.sourceNode.connect(this.scriptProcessorNode);
@@ -403,7 +478,12 @@ export class GdmLiveAudio extends LitElement {
           async (blob) => {
             if (blob) {
               const base64Data = await this.blobToBase64(blob);
-              this.sessionPromise
+              const sessionPromise = this.sessionPromise;
+              if (!sessionPromise) {
+                return;
+              }
+
+              sessionPromise
                 .then((session) => {
                   session.sendRealtimeInput({
                     media: {data: base64Data, mimeType: 'image/jpeg'},
@@ -424,7 +504,7 @@ export class GdmLiveAudio extends LitElement {
       }, 500); // 2 frames per second
 
       this.isRecording = true;
-      this.updateStatus('🔴 Recording... Capturing audio+video');
+      this.updateStatus('');
     } catch (err) {
       console.error('Error starting recording:', err);
       this.updateStatus(`Error: ${err.message}`);
@@ -436,7 +516,7 @@ export class GdmLiveAudio extends LitElement {
     if (!this.isRecording && !this.mediaStream && !this.inputAudioContext)
       return;
 
-    this.updateStatus('Stopping recording...');
+    this.updateStatus('');
 
     this.isRecording = false;
 
@@ -462,67 +542,119 @@ export class GdmLiveAudio extends LitElement {
       this.videoElement.srcObject = null;
     }
 
-    this.updateStatus('Recording stopped. Click Start to begin again.');
+    this.framesSent = 0;
+    this.updateStatus('');
+  }
+
+  private stopApplication() {
+    if (this.appStopped) {
+      return;
+    }
+
+    this.stopRecording();
+
+    for (const source of this.sources.values()) {
+      try {
+        source.stop();
+      } catch {}
+      this.sources.delete(source);
+    }
+
+    const sessionPromise = this.sessionPromise;
+    this.sessionPromise = undefined;
+
+    sessionPromise
+      ?.then((session) => session.close())
+      .catch((e) => this.updateError('Session close failed: ' + e.message));
+
+    this.videoElement?.pause();
+    if (this.videoElement) {
+      this.videoElement.srcObject = null;
+    }
+
+    this.appStopped = true;
+    this.updateStatus('Session ended');
+  }
+
+  private async restartApplication() {
+    if (this.isRecording) {
+      return;
+    }
+
+    this.updateStatus('Restarting session...');
+    this.sessionPromise = this.initSession();
+    this.appStopped = false;
+
+    try {
+      await this.startRecording();
+    } catch (error) {
+      this.updateError('Restart failed: ' + (error as Error).message);
+    }
   }
 
   private reset() {
     this.sessionPromise?.then((session) => session.close());
     this.sessionPromise = this.initSession();
-    this.updateStatus('Session cleared.');
+    this.updateStatus('');
+  }
+
+  private async handleSpeakTap() {
+    if (this.isRecording) {
+      this.stopApplication();
+      return;
+    }
+
+    if (this.appStopped) {
+      await this.restartApplication();
+      return;
+    }
+
+    try {
+      await this.startRecording();
+    } catch (err) {
+      console.error('Error handling speak tap:', err);
+    }
   }
 
   render() {
     return html`
-      <div>
-        <video id="video-background" autoplay muted playsinline></video>
+      <div class="layout">
+        <video
+          id="video-background"
+          autoplay
+          muted
+          playsinline
+          ?hidden=${this.appStopped}></video>
         <canvas id="frame-canvas" style="display:none"></canvas>
-        <div class="controls">
+        ${this.error
+          ? html`<div class="error-banner" role="alert">${this.error}</div>`
+          : null}
+        <div class="speak-area">
+          <gdm-live-audio-visuals-3d
+            .inputNode=${this.inputNode}
+            .outputNode=${this.outputNode}></gdm-live-audio-visuals-3d>
+          ${this.appStopped
+            ? html`<div class="session-overlay">Session Ended</div>`
+            : null}
           <button
-            id="resetButton"
-            @click=${this.reset}
-            ?disabled=${this.isRecording}>
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              height="40px"
-              viewBox="0 -960 960 960"
-              width="40px"
-              fill="#ffffff">
-              <path
-                d="M480-160q-134 0-227-93t-93-227q0-134 93-227t227-93q69 0 132 28.5T720-690v-110h80v280H520v-80h168q-32-56-87.5-88T480-720q-100 0-170 70t-70 170q0 100 70 170t170 70q77 0 139-44t87-116h84q-28 106-114 173t-196 67Z" />
-            </svg>
-          </button>
-          <button
-            id="startButton"
-            @click=${this.startRecording}
-            ?disabled=${this.isRecording}>
-            <svg
-              viewBox="0 0 100 100"
-              width="32px"
-              height="32px"
-              fill="#c80000"
-              xmlns="http://www.w3.org/2000/svg">
-              <circle cx="50" cy="50" r="50" />
-            </svg>
-          </button>
-          <button
-            id="stopButton"
-            @click=${this.stopRecording}
-            ?disabled=${!this.isRecording}>
-            <svg
-              viewBox="0 0 100 100"
-              width="32px"
-              height="32px"
-              fill="#000000"
-              xmlns="http://www.w3.org/2000/svg">
-              <rect x="0" y="0" width="100" height="100" rx="15" />
-            </svg>
+            class="speak-button"
+            type="button"
+            aria-pressed=${this.isRecording}
+            aria-label=${this.isRecording
+              ? 'Stop session'
+              : this.appStopped
+                ? 'Restart session'
+                : 'Tap to speak'}
+            @click=${this.handleSpeakTap}>
+            <span class="speak-label">
+              ${this.isRecording
+                ? 'Stop Session'
+                : this.appStopped
+                  ? 'Restart Session'
+                  : 'Tap to Speak'}
+            </span>
           </button>
         </div>
-
-        <div id="status"> ${this.status || this.error} </div>
-        <gdm-live-audio-visuals-3d
-          .inputNode=${this.inputNode}
-          .outputNode=${this.outputNode}></gdm-live-audio-visuals-3d>
       </div>
     `;
   }

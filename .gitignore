@@ -26,3 +26,4 @@ dist-ssr
 certs/
 
 .env.local
+public/piz_compressed.exr

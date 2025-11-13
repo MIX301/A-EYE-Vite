@@ -22,7 +22,7 @@
 4. Start dev server: `npm run dev` and open `https://192.168.x.x:3000` in iPhone Safari.
 5. Allow camera/mic, tap Start to unlock audio, then Share → Add to Home Screen.
 
-
+ 
 
 (base) eirvav@Eiriks-MacBook-Pro-2 ~ % mkdir -p certs
 
