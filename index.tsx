@@ -22,6 +22,7 @@ try {
 @customElement('gdm-live-audio')
 export class GdmLiveAudio extends LitElement {
   @state() isRecording = false;
+  @state() isHolding = false;
   @state() status = '';
   @state() error = '';
   @state() appStopped = false;
@@ -136,6 +137,13 @@ export class GdmLiveAudio extends LitElement {
       padding: 24px 24px calc(24px + env(safe-area-inset-bottom));
       color: inherit;
       transition: background 0.2s ease;
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      -moz-user-select: none;
+      -ms-user-select: none;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
     }
 
     .speak-button:hover,
@@ -154,6 +162,12 @@ export class GdmLiveAudio extends LitElement {
       text-transform: uppercase;
       color: rgba(255, 255, 255, 0.92);
       text-shadow: 0 0 6px rgba(0, 0, 0, 0.6);
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      -moz-user-select: none;
+      -ms-user-select: none;
+      user-select: none;
+      pointer-events: none;
     }
 
     .error-banner {
@@ -216,6 +230,7 @@ export class GdmLiveAudio extends LitElement {
 
   private initAudio() {
     this.nextStartTime = this.outputAudioContext.currentTime;
+    this.inputNode.gain.value = 0.0; // Start with mic muted
   }
 
   private async initClient() {
@@ -291,6 +306,33 @@ export class GdmLiveAudio extends LitElement {
         },
         config: {
           responseModalities: [Modality.AUDIO],
+          systemInstruction: {
+            parts: [
+              {
+                text: `You are an AI assistant integrated into an application where the main interface is a live camera view. The user interacts with you by pressing and holding a large button at the bottom of the screen. When the button is active, you listen to the user's voice input and provide an answer based on what is visible through the camera.
+
+Your task is to analyze the live camera feed and interpret the user’s spoken request in combination. Always respond with precise, spatially grounded instructions that reference items or locations visible on the screen.
+
+When giving instructions:
+
+Be specific and concise.
+
+Refer to locations using clear spatial language (e.g., “third shelf from the top,” “top right corner,” “behind the red box,” etc.).
+
+Only describe what is visible on the camera or can be reasonably inferred from it.
+
+Do not invent objects or locations that are not present in the scene.
+
+Keep answers straightforward and helpful.
+
+Example:
+If the user asks, “Where is the gluten-free bread?” and it is visible through the camera, respond with a description such as:
+“The gluten-free bread is on the third shelf from the top, in the top right corner.”
+
+Your goal is to help the user locate objects in the environment accurately and efficiently based on real-time visual input.`,
+              },
+            ],
+          },
           speechConfig: {
             voiceConfig: {prebuiltVoiceConfig: {voiceName: 'Zephyr'}},
             // languageCode: 'en-GB'
@@ -426,6 +468,7 @@ export class GdmLiveAudio extends LitElement {
 
       this.scriptProcessorNode.onaudioprocess = (audioProcessingEvent) => {
         if (!this.isRecording) return;
+        if (!this.isHolding) return;
 
         const inputBuffer = audioProcessingEvent.inputBuffer;
         const pcmData = inputBuffer.getChannelData(0);
@@ -598,22 +641,27 @@ export class GdmLiveAudio extends LitElement {
     this.updateStatus('');
   }
 
-  private async handleSpeakTap() {
-    if (this.isRecording) {
-      this.stopApplication();
-      return;
+  private async handleHoldStart() {
+    if (!this.isRecording) {
+      if (this.appStopped) {
+        await this.restartApplication();
+      } else {
+        try {
+          await this.startRecording();
+        } catch (err) {
+          console.error('Error starting recording:', err);
+          return;
+        }
+      }
     }
+    
+    this.isHolding = true;
+    this.inputNode.gain.value = 1.0;
+  }
 
-    if (this.appStopped) {
-      await this.restartApplication();
-      return;
-    }
-
-    try {
-      await this.startRecording();
-    } catch (err) {
-      console.error('Error handling speak tap:', err);
-    }
+  private handleHoldEnd() {
+    this.isHolding = false;
+    this.inputNode.gain.value = 0.0;
   }
 
   render() {
@@ -639,19 +687,34 @@ export class GdmLiveAudio extends LitElement {
           <button
             class="speak-button"
             type="button"
-            aria-pressed=${this.isRecording}
-            aria-label=${this.isRecording
-              ? 'Stop session'
-              : this.appStopped
-                ? 'Restart session'
-                : 'Tap to speak'}
-            @click=${this.handleSpeakTap}>
+            aria-pressed=${this.isHolding}
+            aria-label=${this.isHolding ? 'Release to mute' : 'Hold to speak'}
+            @touchstart=${(e: TouchEvent) => {
+              e.preventDefault();
+              this.handleHoldStart();
+            }}
+            @touchend=${(e: TouchEvent) => {
+              e.preventDefault();
+              this.handleHoldEnd();
+            }}
+            @touchcancel=${(e: TouchEvent) => {
+              e.preventDefault();
+              this.handleHoldEnd();
+            }}
+            @mousedown=${(e: MouseEvent) => {
+              e.preventDefault();
+              this.handleHoldStart();
+            }}
+            @mouseup=${(e: MouseEvent) => {
+              e.preventDefault();
+              this.handleHoldEnd();
+            }}
+            @mouseleave=${(e: MouseEvent) => {
+              e.preventDefault();
+              this.handleHoldEnd();
+            }}>
             <span class="speak-label">
-              ${this.isRecording
-                ? 'Stop Session'
-                : this.appStopped
-                  ? 'Restart Session'
-                  : 'Tap to Speak'}
+              ${this.isHolding ? 'Release to Mute' : 'Hold to Speak'}
             </span>
           </button>
         </div>
