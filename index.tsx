@@ -12,7 +12,7 @@ import './visual-3d';
 // PWA: register service worker if available
 try {
   // dynamic import optional; vite-plugin-pwa injects virtual module
-  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+  // eslint-disable-next-line @typescript-eslint/ban-ts-GB
   // @ts-ignore
   import('virtual:pwa-register').then(({ registerSW }) => {
     registerSW({ immediate: true });
@@ -26,17 +26,15 @@ export class GdmLiveAudio extends LitElement {
   @state() status = '';
   @state() error = '';
   @state() appStopped = false;
+  @state() sessionStarted = false;
 
   private client: GoogleGenAI;
   private sessionPromise?: Promise<Session>;
-  // FIX: Cast window to `any` to access prefixed `webkitAudioContext` for older browsers.
-  private inputAudioContext = new (window.AudioContext ||
-    (window as any).webkitAudioContext)({sampleRate: 16000});
-  // FIX: Cast window to `any` to access prefixed `webkitAudioContext` for older browsers.
-  private outputAudioContext = new (window.AudioContext ||
-    (window as any).webkitAudioContext)({sampleRate: 24000});
-  @state() inputNode = this.inputAudioContext.createGain();
-  @state() outputNode = this.outputAudioContext.createGain();
+  // Audio contexts created on user gesture for iOS PWA compatibility
+  private inputAudioContext?: AudioContext;
+  private outputAudioContext?: AudioContext;
+  @state() inputNode?: GainNode;
+  @state() outputNode?: GainNode;
   private nextStartTime = 0;
   private mediaStream: MediaStream;
   private sourceNode: AudioNode;
@@ -91,6 +89,7 @@ export class GdmLiveAudio extends LitElement {
       border: 1px solid rgba(255, 255, 255, 0.08);
       border-bottom: none;
       overflow: hidden;
+      background: rgba(0, 0, 0, 0.3);
       backdrop-filter: blur(6px);
     }
 
@@ -186,6 +185,46 @@ export class GdmLiveAudio extends LitElement {
       box-shadow: 0 12px 24px rgba(0, 0, 0, 0.35);
       backdrop-filter: blur(12px);
     }
+
+    .start-button {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 1000;
+      padding: 20px 40px;
+      background: rgba(255, 255, 255, 0.25);
+      color: #ffffff;
+      border: 2px solid rgba(255, 255, 255, 0.5);
+      border-radius: 16px;
+      font-size: 18px;
+      font-weight: 500;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.1);
+      -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
+      white-space: nowrap;
+    }
+
+    .start-button:hover,
+    .start-button:focus-visible {
+      background: rgba(255, 255, 255, 0.25);
+      border-color: rgba(255, 255, 255, 0.5);
+      transform: translate(-50%, -50%) scale(1.05);
+    }
+
+    .start-button:active {
+      transform: translate(-50%, -50%) scale(0.98);
+    }
+
+    .start-button:focus-visible {
+      outline: 2px solid rgba(255, 255, 255, 0.5);
+      outline-offset: 4px;
+    }
   `;
 
   constructor() {
@@ -202,8 +241,12 @@ export class GdmLiveAudio extends LitElement {
     this.checkPermissions();
     this.addEventListener('click', async () => {
       try {
-        await this.outputAudioContext.resume();
-        await this.inputAudioContext.resume();
+        if (this.outputAudioContext) {
+          await this.outputAudioContext.resume();
+        }
+        if (this.inputAudioContext) {
+          await this.inputAudioContext.resume();
+        }
       } catch {}
     });
   }
@@ -229,22 +272,21 @@ export class GdmLiveAudio extends LitElement {
   }
 
   private initAudio() {
-    this.nextStartTime = this.outputAudioContext.currentTime;
-    this.inputNode.gain.value = 0.0; // Start with mic muted
+    if (this.outputAudioContext && this.inputNode) {
+      this.nextStartTime = this.outputAudioContext.currentTime;
+      this.inputNode.gain.value = 0.0; // Start with mic muted
+    }
   }
 
   private async initClient() {
-    this.initAudio();
-
     if (!process.env.API_KEY || process.env.API_KEY === 'undefined') {
       this.updateError('Missing GEMINI_API_KEY');
     }
 
     this.client = new GoogleGenAI({apiKey: process.env.API_KEY});
 
-    this.outputNode.connect(this.outputAudioContext.destination);
-
-    this.sessionPromise = this.initSession();
+    // Audio contexts and nodes will be created on user gesture
+    // Session will be initialized when user starts session
   }
 
   private initSession(): Promise<Session> {
@@ -262,7 +304,7 @@ export class GdmLiveAudio extends LitElement {
             const audio =
               message.serverContent?.modelTurn?.parts[0]?.inlineData;
 
-            if (audio) {
+            if (audio && this.outputAudioContext && this.outputNode) {
               this.nextStartTime = Math.max(
                 this.nextStartTime,
                 this.outputAudioContext.currentTime,
@@ -368,9 +410,14 @@ Your goal is to help the user locate objects in the environment accurately and e
     });
   }
 
-  private async startRecording() {
+  private async startRecordingWithStream(stream: MediaStream) {
     if (this.isRecording) {
+      stream.getTracks().forEach((t) => t.stop());
       return;
+    }
+
+    if (!this.inputAudioContext || !this.outputAudioContext || !this.inputNode || !this.outputNode) {
+      throw new Error('Audio contexts not initialized');
     }
 
     if (!this.sessionPromise) {
@@ -379,6 +426,166 @@ Your goal is to help the user locate objects in the environment accurately and e
 
     this.appStopped = false;
     this.framesSent = 0;
+
+    // Ensure audio contexts are resumed and running before using them
+    if (this.inputAudioContext.state !== 'running') {
+      await this.inputAudioContext.resume();
+    }
+    if (this.outputAudioContext.state !== 'running') {
+      await this.outputAudioContext.resume();
+    }
+
+    this.mediaStream = stream;
+
+    this.videoElement.srcObject = this.mediaStream;
+    try {
+      await this.videoElement.play();
+    } catch (e) {
+      console.warn('video.play() failed', e);
+    }
+
+    const vt = this.mediaStream.getVideoTracks()[0];
+    const at = this.mediaStream.getAudioTracks()[0];
+    this.updateStatus('Media access granted. v=' + (!!vt) + ' a=' + (!!at));
+
+    // Ensure we have an audio track before proceeding
+    if (!at) {
+      throw new Error('No audio track available in media stream');
+    }
+
+    // Ensure audio track is enabled and ready
+    if (!at.enabled) {
+      at.enabled = true;
+    }
+
+    // Ensure audio track is ready - wait a bit if needed
+    let trackReadyState = at.readyState;
+    if (trackReadyState !== 'live') {
+      // Wait for track to become live (max 1 second)
+      let attempts = 0;
+      while (trackReadyState !== 'live' && attempts < 10) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        trackReadyState = at.readyState;
+        attempts++;
+      }
+      if (trackReadyState !== 'live') {
+        throw new Error('Audio track is not live. State: ' + trackReadyState);
+      }
+    }
+
+    // Create media stream source only after audio context is running
+    if (this.inputAudioContext.state === 'running') {
+      try {
+        this.sourceNode = this.inputAudioContext.createMediaStreamSource(
+          this.mediaStream,
+        );
+        this.sourceNode.connect(this.inputNode);
+      } catch (e) {
+        throw new Error('Failed to create media stream source: ' + (e as Error).message);
+      }
+    } else {
+      throw new Error('Audio context is not running. State: ' + this.inputAudioContext.state);
+    }
+
+    const bufferSize = 4096;
+    this.scriptProcessorNode = this.inputAudioContext.createScriptProcessor(
+      bufferSize,
+      1,
+      1,
+    );
+
+    this.scriptProcessorNode.onaudioprocess = (audioProcessingEvent) => {
+      if (!this.isRecording) return;
+      if (!this.isHolding) return;
+
+      const inputBuffer = audioProcessingEvent.inputBuffer;
+      const pcmData = inputBuffer.getChannelData(0);
+      const srcRate = this.inputAudioContext.sampleRate;
+      const downsampleTo16k = (float32: Float32Array, inRate: number) => {
+        if (inRate === 16000) return float32;
+        const ratio = inRate / 16000;
+        const newLen = Math.floor(float32.length / ratio);
+        const result = new Float32Array(newLen);
+        let idx = 0, pos = 0;
+        while (idx < newLen) {
+          const nextPos = Math.min(float32.length - 1, (idx + 1) * ratio);
+          let sum = 0, count = 0;
+          for (let i = pos; i < nextPos; i++) { sum += float32[i]; count++; }
+          result[idx++] = sum / Math.max(1, count);
+          pos = nextPos;
+        }
+        return result;
+      };
+      const mono16k = srcRate === 16000 ? pcmData : downsampleTo16k(pcmData, srcRate);
+
+      const sessionPromise = this.sessionPromise;
+      if (!sessionPromise) {
+        return;
+      }
+
+      sessionPromise
+        .then((session) => {
+          session.sendRealtimeInput({media: createBlob(mono16k)});
+        })
+        .catch((e) => this.updateError('Session send failed: ' + e.message));
+    };
+
+    this.sourceNode.connect(this.scriptProcessorNode);
+    this.scriptProcessorNode.connect(this.inputAudioContext.destination);
+
+    this.frameInterval = window.setInterval(() => {
+      if (!this.isRecording) return;
+      const context = this.canvasElement.getContext('2d');
+      this.canvasElement.width = this.videoElement.videoWidth;
+      this.canvasElement.height = this.videoElement.videoHeight;
+      context.drawImage(
+        this.videoElement,
+        0,
+        0,
+        this.canvasElement.width,
+        this.canvasElement.height,
+      );
+      this.canvasElement.toBlob(
+        async (blob) => {
+          if (blob) {
+            const base64Data = await this.blobToBase64(blob);
+            const sessionPromise = this.sessionPromise;
+            if (!sessionPromise) {
+              return;
+            }
+
+            sessionPromise
+              .then((session) => {
+                session.sendRealtimeInput({
+                  media: {data: base64Data, mimeType: 'image/jpeg'},
+                });
+                this.framesSent++;
+                if (this.framesSent % 10 === 0) {
+                  this.debug(`Frames sent: ${this.framesSent}`);
+                }
+              })
+              .catch((e) =>
+                this.updateError('Session send (image) failed: ' + e.message),
+              );
+          }
+        },
+        'image/jpeg',
+        0.8,
+      );
+    }, 500); // 2 frames per second
+
+    this.isRecording = true;
+    this.updateStatus('');
+  }
+
+  private async startRecording() {
+    if (this.isRecording) {
+      return;
+    }
+
+    if (!this.inputAudioContext || !this.outputAudioContext) {
+      throw new Error('Audio contexts not initialized');
+    }
 
     await this.inputAudioContext.resume();
     await this.outputAudioContext.resume();
@@ -441,113 +648,8 @@ Your goal is to help the user locate objects in the environment accurately and e
         }
       };
 
-      this.mediaStream = await preferBackCamera();
-
-      this.videoElement.srcObject = this.mediaStream;
-      try {
-        await this.videoElement.play();
-      } catch (e) {
-        console.warn('video.play() failed', e);
-      }
-
-      const vt = this.mediaStream.getVideoTracks()[0];
-      const at = this.mediaStream.getAudioTracks()[0];
-      this.updateStatus('Media access granted. v=' + (!!vt) + ' a=' + (!!at));
-
-      this.sourceNode = this.inputAudioContext.createMediaStreamSource(
-        this.mediaStream,
-      );
-      this.sourceNode.connect(this.inputNode);
-
-      const bufferSize = 4096;
-      this.scriptProcessorNode = this.inputAudioContext.createScriptProcessor(
-        bufferSize,
-        1,
-        1,
-      );
-
-      this.scriptProcessorNode.onaudioprocess = (audioProcessingEvent) => {
-        if (!this.isRecording) return;
-        if (!this.isHolding) return;
-
-        const inputBuffer = audioProcessingEvent.inputBuffer;
-        const pcmData = inputBuffer.getChannelData(0);
-        const srcRate = this.inputAudioContext.sampleRate;
-        const downsampleTo16k = (float32: Float32Array, inRate: number) => {
-          if (inRate === 16000) return float32;
-          const ratio = inRate / 16000;
-          const newLen = Math.floor(float32.length / ratio);
-          const result = new Float32Array(newLen);
-          let idx = 0, pos = 0;
-          while (idx < newLen) {
-            const nextPos = Math.min(float32.length - 1, (idx + 1) * ratio);
-            let sum = 0, count = 0;
-            for (let i = pos; i < nextPos; i++) { sum += float32[i]; count++; }
-            result[idx++] = sum / Math.max(1, count);
-            pos = nextPos;
-          }
-          return result;
-        };
-        const mono16k = srcRate === 16000 ? pcmData : downsampleTo16k(pcmData, srcRate);
-
-        const sessionPromise = this.sessionPromise;
-        if (!sessionPromise) {
-          return;
-        }
-
-        sessionPromise
-          .then((session) => {
-            session.sendRealtimeInput({media: createBlob(mono16k)});
-          })
-          .catch((e) => this.updateError('Session send failed: ' + e.message));
-      };
-
-      this.sourceNode.connect(this.scriptProcessorNode);
-      this.scriptProcessorNode.connect(this.inputAudioContext.destination);
-
-      this.frameInterval = window.setInterval(() => {
-        if (!this.isRecording) return;
-        const context = this.canvasElement.getContext('2d');
-        this.canvasElement.width = this.videoElement.videoWidth;
-        this.canvasElement.height = this.videoElement.videoHeight;
-        context.drawImage(
-          this.videoElement,
-          0,
-          0,
-          this.canvasElement.width,
-          this.canvasElement.height,
-        );
-        this.canvasElement.toBlob(
-          async (blob) => {
-            if (blob) {
-              const base64Data = await this.blobToBase64(blob);
-              const sessionPromise = this.sessionPromise;
-              if (!sessionPromise) {
-                return;
-              }
-
-              sessionPromise
-                .then((session) => {
-                  session.sendRealtimeInput({
-                    media: {data: base64Data, mimeType: 'image/jpeg'},
-                  });
-                  this.framesSent++;
-                  if (this.framesSent % 10 === 0) {
-                    this.debug(`Frames sent: ${this.framesSent}`);
-                  }
-                })
-                .catch((e) =>
-                  this.updateError('Session send (image) failed: ' + e.message),
-                );
-            }
-          },
-          'image/jpeg',
-          0.8,
-        );
-      }, 500); // 2 frames per second
-
-      this.isRecording = true;
-      this.updateStatus('');
+      const stream = await preferBackCamera();
+      await this.startRecordingWithStream(stream);
     } catch (err) {
       console.error('Error starting recording:', err);
       this.updateStatus(`Error: ${err.message}`);
@@ -641,6 +743,89 @@ Your goal is to help the user locate objects in the environment accurately and e
     this.updateStatus('');
   }
 
+  private async handleStartSession() {
+    if (this.sessionStarted) {
+      return;
+    }
+    
+    this.sessionStarted = true;
+    this.updateStatus('Requesting camera/mic access...');
+    
+    let stream: MediaStream | null = null;
+    
+    try {
+      // Create audio contexts within user gesture for iOS PWA compatibility
+      // This MUST be done synchronously from the event handler
+      if (!this.inputAudioContext) {
+        this.inputAudioContext = new (window.AudioContext ||
+          (window as any).webkitAudioContext)({sampleRate: 16000});
+      }
+      if (!this.outputAudioContext) {
+        this.outputAudioContext = new (window.AudioContext ||
+          (window as any).webkitAudioContext)({sampleRate: 24000});
+      }
+      
+      // Create gain nodes if they don't exist
+      if (!this.inputNode) {
+        this.inputNode = this.inputAudioContext.createGain();
+        this.inputNode.gain.value = 0.0; // Start with mic muted
+      }
+      if (!this.outputNode) {
+        this.outputNode = this.outputAudioContext.createGain();
+        this.outputNode.connect(this.outputAudioContext.destination);
+      }
+      
+      // Initialize session if not already done
+      if (!this.sessionPromise) {
+        this.sessionPromise = this.initSession();
+      }
+      
+      // Request permissions directly from user gesture handler
+      // This MUST be called synchronously from the event handler on iOS
+      const constraints: MediaStreamConstraints = {
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        video: {
+          facingMode: { ideal: 'environment' },
+        },
+      };
+      
+      // Call getUserMedia immediately to preserve user gesture context
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      
+      // Ensure audio contexts are running (they should be already, but check)
+      if (this.inputAudioContext.state !== 'running') {
+        await this.inputAudioContext.resume();
+      }
+      if (this.outputAudioContext.state !== 'running') {
+        await this.outputAudioContext.resume();
+      }
+      
+      // Small delay to ensure audio contexts are fully ready
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      // Initialize audio timing
+      this.initAudio();
+      
+      // Now start recording with the stream
+      await this.startRecordingWithStream(stream);
+    } catch (err) {
+      console.error('Error starting session:', err);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      this.updateError('Failed to access camera/microphone: ' + errorMessage);
+      this.sessionStarted = false; // Allow retry on error
+      
+      // Clean up stream if it was created
+      if (stream) {
+        stream.getTracks().forEach((t) => t.stop());
+      }
+    }
+  }
+
   private async handleHoldStart() {
     if (!this.isRecording) {
       if (this.appStopped) {
@@ -656,12 +841,16 @@ Your goal is to help the user locate objects in the environment accurately and e
     }
     
     this.isHolding = true;
-    this.inputNode.gain.value = 1.0;
+    if (this.inputNode) {
+      this.inputNode.gain.value = 1.0;
+    }
   }
 
   private handleHoldEnd() {
     this.isHolding = false;
-    this.inputNode.gain.value = 0.0;
+    if (this.inputNode) {
+      this.inputNode.gain.value = 0.0;
+    }
   }
 
   render() {
@@ -677,10 +866,27 @@ Your goal is to help the user locate objects in the environment accurately and e
         ${this.error
           ? html`<div class="error-banner" role="alert">${this.error}</div>`
           : null}
+        ${!this.sessionStarted
+          ? html`
+              <button
+                class="start-button"
+                type="button"
+                aria-label="Start Session"
+                @click=${this.handleStartSession}
+                @touchstart=${(e: TouchEvent) => {
+                  e.preventDefault();
+                  this.handleStartSession();
+                }}>
+                Start Session
+              </button>
+            `
+          : null}
         <div class="speak-area">
-          <gdm-live-audio-visuals-3d
-            .inputNode=${this.inputNode}
-            .outputNode=${this.outputNode}></gdm-live-audio-visuals-3d>
+          ${this.inputNode && this.outputNode
+            ? html`<gdm-live-audio-visuals-3d
+                .inputNode=${this.inputNode}
+                .outputNode=${this.outputNode}></gdm-live-audio-visuals-3d>`
+            : null}
           ${this.appStopped
             ? html`<div class="session-overlay">Session Ended</div>`
             : null}
