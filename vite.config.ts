@@ -30,7 +30,7 @@ export default defineConfig(({ mode }) => {
           registerType: 'autoUpdate',
           manifest: {
             name: 'Live Vision',
-            short_name: 'LiveVision',
+            short_name: 'A-EYE',
             start_url: '/',
             display: 'standalone',
             orientation: 'portrait',
