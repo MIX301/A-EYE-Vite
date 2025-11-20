@@ -2,6 +2,10 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
+ * 
+If asked "Who are these people?", respond with the following: "This is the lovely jury! Lars and Helene!".
+Julie & Anine & Fredrike & Miroslav
+If asked "Who is this man?", respond with the following: "This is Tien, your professor!".
  */
 
 import {GoogleGenAI, LiveServerMessage, Modality, Session} from '@google/genai';
@@ -49,6 +53,7 @@ export class GdmLiveAudio extends LitElement {
   private framesSent = 0;
   private isStandalonePWA = false;
   private isStarting = false;
+   private inPermissionFlow = false;
   private isIOS = /iPad|iPhone|iPod/i.test(navigator.userAgent);
 
   static styles = css`
@@ -129,7 +134,7 @@ export class GdmLiveAudio extends LitElement {
       padding: 24px;
       gap: 16px;
       background: rgba(0, 0, 0, 0.6);
-      z-index: 999;
+      z-index: 9999;
       text-align: center;
       pointer-events: auto;
     }
@@ -260,6 +265,8 @@ export class GdmLiveAudio extends LitElement {
     });
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
+        // Avoid tearing down while iOS permission sheet is open or startup is in progress.
+        if (this.inPermissionFlow || this.isStarting) return;
         this.stopRecording();
       } else {
         this.outputAudioContext.resume().catch(() => {});
@@ -267,6 +274,7 @@ export class GdmLiveAudio extends LitElement {
       }
     });
     window.addEventListener('pagehide', () => {
+      if (this.inPermissionFlow || this.isStarting) return;
       try { sessionStorage.removeItem('permDone'); } catch {}
       this.stopApplication();
     });
@@ -324,19 +332,43 @@ export class GdmLiveAudio extends LitElement {
   private async bootstrapPermissions() {
     this.updateStatus('Requesting access...');
     try {
-      await this.resetAudioContextsForIOSIfStandalone();
-      await this.outputAudioContext.resume();
-      await this.inputAudioContext.resume();
-      await this.startRecording();
+      this.inPermissionFlow = true;
+      // Optimistically hide the gate immediately on tap for better UX.
+      // Do NOT await anything before getUserMedia to preserve user activation.
       this.showPermissionGate = false;
+      // IMPORTANT for iOS PWA: call getUserMedia as the FIRST awaited action.
+      const preAcquiredStream = await this.acquireMediaFromUserGesture();
       try {
         sessionStorage.setItem('permDone', '1');
       } catch {}
+      await this.resetAudioContextsForIOSIfStandalone();
+      await this.outputAudioContext.resume();
+      await this.inputAudioContext.resume();
+      await this.startRecording(preAcquiredStream);
       this.updateStatus('');
     } catch (err) {
       console.error('Permission bootstrap failed:', err);
-      this.updateError('Permission request failed: ' + (err as Error).message);
+      // Restore gate if permission flow failed
+      this.showPermissionGate = true;
+      try { sessionStorage.removeItem('permDone'); } catch {}
+      const message = (err as Error)?.message || String(err);
+      const hint =
+        /NotAllowedError|denied/i.test(message)
+          ? ' On iOS Home Screen apps, ensure Camera and Microphone are allowed in Settings for this app.'
+          : '';
+      this.updateError('Permission request failed: ' + message + hint);
+    } finally {
+      this.inPermissionFlow = false;
     }
+  }
+
+  // Acquire mic+camera immediately in the user gesture to satisfy iOS PWA gating.
+  private async acquireMediaFromUserGesture(): Promise<MediaStream> {
+    const constraints: MediaStreamConstraints = {
+      audio: true,
+      video: {facingMode: {ideal: 'environment'}},
+    };
+    return await navigator.mediaDevices.getUserMedia(constraints);
   }
 
   private async checkPermissions() {
@@ -499,7 +531,7 @@ Your goal is to help the user locate objects in the environment accurately and e
     });
   }
 
-  private async startRecording() {
+  private async startRecording(preAcquiredStream?: MediaStream) {
     if (this.isRecording || this.isStarting) {
       return;
     }
@@ -513,7 +545,7 @@ Your goal is to help the user locate objects in the environment accurately and e
       this.appStopped = false;
       this.framesSent = 0;
 
-      this.updateStatus('Requesting camera/mic access...');
+      this.updateStatus(preAcquiredStream ? 'Setting up media...' : 'Requesting camera/mic access...');
 
       // Ensure previous stream is fully released before acquiring
       if (this.mediaStream) {
@@ -523,76 +555,78 @@ Your goal is to help the user locate objects in the environment accurately and e
         this.mediaStream = null;
       }
 
-      const preferBackCamera = async (): Promise<MediaStream> => {
-        // Primary: minimal constraints for iOS stability
-        const primary: MediaStreamConstraints = {
-          audio: true,
-          video: { facingMode: { ideal: 'environment' } },
-        };
-        this.debug('getUserMedia primary', primary);
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia(primary);
-          const track = stream.getVideoTracks()[0];
-          const settings = (track?.getSettings?.() || {}) as MediaTrackSettings;
-          this.debug('Primary stream settings', settings);
-          if (settings.facingMode !== 'environment') {
-            const devices = await navigator.mediaDevices.enumerateDevices();
-            const back = devices.find(
-              (d) =>
-                d.kind === 'videoinput' &&
-                /back|rear|environment/i.test(d.label),
-            );
-            if (back) {
-              try {
-                const enforced = await navigator.mediaDevices.getUserMedia({
-                  audio: true,
-                  video: { deviceId: { exact: back.deviceId } },
-                });
-                stream.getTracks().forEach((t) => t.stop());
-                return enforced;
-              } catch {
-                // continue with primary
+      if (preAcquiredStream) {
+        this.mediaStream = preAcquiredStream;
+      } else {
+        const preferBackCamera = async (): Promise<MediaStream> => {
+          // Primary: minimal constraints for iOS stability
+          const primary: MediaStreamConstraints = {
+            audio: true,
+            video: {facingMode: {ideal: 'environment'}},
+          };
+          this.debug('getUserMedia primary', primary);
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia(primary);
+            const track = stream.getVideoTracks()[0];
+            const settings = (track?.getSettings?.() || {}) as MediaTrackSettings;
+            this.debug('Primary stream settings', settings);
+            if (settings.facingMode !== 'environment') {
+              const devices = await navigator.mediaDevices.enumerateDevices();
+              const back = devices.find(
+                (d) =>
+                  d.kind === 'videoinput' && /back|rear|environment/i.test(d.label),
+              );
+              if (back) {
+                try {
+                  const enforced = await navigator.mediaDevices.getUserMedia({
+                    audio: true,
+                    video: {deviceId: {exact: back.deviceId}},
+                  });
+                  stream.getTracks().forEach((t) => t.stop());
+                  return enforced;
+                } catch {
+                  // continue with primary
+                }
               }
             }
-          }
-          return stream;
-        } catch (e) {
-          // Fallback A: request audio-only then video, combine
-          this.debug('Primary gUM failed, trying fallbacks', e);
-          try {
-            const audioOnly = await navigator.mediaDevices.getUserMedia({
-              audio: true,
-              video: false,
-            });
-            let videoStream: MediaStream | null = null;
+            return stream;
+          } catch (e) {
+            // Fallback A: request audio-only then video, combine
+            this.debug('Primary gUM failed, trying fallbacks', e);
             try {
-              videoStream = await navigator.mediaDevices.getUserMedia({
-                audio: false,
-                video: { facingMode: { ideal: 'environment' } },
+              const audioOnly = await navigator.mediaDevices.getUserMedia({
+                audio: true,
+                video: false,
               });
-            } catch {
-              videoStream = await navigator.mediaDevices.getUserMedia({
-                audio: false,
+              let videoStream: MediaStream | null = null;
+              try {
+                videoStream = await navigator.mediaDevices.getUserMedia({
+                  audio: false,
+                  video: {facingMode: {ideal: 'environment'}},
+                });
+              } catch {
+                videoStream = await navigator.mediaDevices.getUserMedia({
+                  audio: false,
+                  video: true,
+                });
+              }
+              const combined = new MediaStream([
+                ...audioOnly.getTracks(),
+                ...(videoStream ? videoStream.getTracks() : []),
+              ]);
+              return combined;
+            } catch (e2) {
+              // Fallback B: try completely permissive as last resort
+              const permissive = await navigator.mediaDevices.getUserMedia({
+                audio: true,
                 video: true,
               });
+              return permissive;
             }
-            const combined = new MediaStream([
-              ...audioOnly.getTracks(),
-              ...(videoStream ? videoStream.getTracks() : []),
-            ]);
-            return combined;
-          } catch (e2) {
-            // Fallback B: try completely permissive as last resort
-            const permissive = await navigator.mediaDevices.getUserMedia({
-              audio: true,
-              video: true,
-            });
-            return permissive;
           }
-        }
-      };
-
-      this.mediaStream = await preferBackCamera();
+        };
+        this.mediaStream = await preferBackCamera();
+      }
       // Resume contexts after stream acquired to keep gesture chain short
       await this.inputAudioContext.resume();
       await this.outputAudioContext.resume();
@@ -843,24 +877,13 @@ Your goal is to help the user locate objects in the environment accurately and e
         ${this.error
           ? html`<div class="error-banner" role="alert">${this.error}</div>`
           : null}
-        ${this.showPermissionGate
+        ${this.showPermissionGate && !this.isRecording
           ? html`
               <div class="permission-gate" role="dialog" aria-modal="true">
                 <button
                   class="permission-button"
                   type="button"
-                  @pointerdown=${(e: PointerEvent) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    this.bootstrapPermissions();
-                  }}
-                  @touchstart=${(e: TouchEvent) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    this.bootstrapPermissions();
-                  }}
                   @click=${(e: MouseEvent) => {
-                    e.preventDefault();
                     e.stopPropagation();
                     this.bootstrapPermissions();
                   }}>
