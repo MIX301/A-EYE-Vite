@@ -2,10 +2,6 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
- * 
-If asked "Who are these people?", respond with the following: "This is the lovely jury! Lars and Helene!".
-Julie & Anine & Fredrike & Miroslav
-If asked "Who is this man?", respond with the following: "This is Tien, your professor!".
  */
 
 import {GoogleGenAI, LiveServerMessage, Modality, Session} from '@google/genai';
